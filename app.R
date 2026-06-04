@@ -4168,6 +4168,34 @@ validate_saved_fit_state <- function(state) {
   invisible(TRUE)
 }
 
+saved_model_file_choices <- function() {
+  files <- list.files(
+    saved_model_dir(),
+    pattern = "\\.rds$",
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+  if (length(files) == 0) return(character(0))
+
+  valid <- vapply(files, function(path) {
+    tryCatch(
+      {
+        validate_saved_fit_state(readRDS(path))
+        TRUE
+      },
+      error = function(e) FALSE
+    )
+  }, logical(1))
+  files <- files[valid]
+  if (length(files) == 0) return(character(0))
+
+  info <- file.info(files)
+  files <- files[order(info$mtime, decreasing = TRUE, na.last = TRUE)]
+  labels <- basename(files)
+  labels[labels == "last_fitted_model.rds"] <- "last_fitted_model.rds (automatic cache)"
+  stats::setNames(files, labels)
+}
+
 load_saved_dataset <- function(res) {
   if (!is.null(res$raw_data) && is.data.frame(res$raw_data)) {
     return(res$raw_data)
@@ -4502,6 +4530,7 @@ build_repro_code <- function(
 
 project_files <- sort(list.files(".", pattern = "\\.(csv|xlsx|xls)$", ignore.case = TRUE))
 project_file_choices <- c("Select a dataset" = "", project_files)
+project_saved_model_choices <- c("Select a saved model" = "", saved_model_file_choices())
 default_file <- ""
 fastglm_method_choices <- c("LLT Cholesky" = "2", "LDLT Cholesky" = "3")
 multinom_method_choices <- c(
@@ -4661,7 +4690,26 @@ explorer_ui <- fluidPage(
       downloadButton("save_model", "Save fitted model"),
       tags$br(),
       tags$br(),
-      fileInput("load_model", "Load saved model", accept = c(".rds")),
+      radioButtons(
+        "model_load_source",
+        "Load saved model from",
+        choices = c("Server saved model" = "server", "Upload model" = "upload"),
+        selected = "server"
+      ),
+      conditionalPanel(
+        "input.model_load_source == 'server'",
+        selectInput(
+          "project_saved_model",
+          "Server saved model",
+          choices = project_saved_model_choices,
+          selected = ""
+        ),
+        actionButton("refresh_saved_models", "Refresh saved models")
+      ),
+      conditionalPanel(
+        "input.model_load_source == 'upload'",
+        fileInput("load_model", "Upload saved model", accept = c(".rds"))
+      ),
       tags$small("Successful fits and app settings are cached automatically in results/saved_models.")
     ),
     mainPanel(
@@ -4720,6 +4768,7 @@ explorer_ui <- fluidPage(
 )
 
 explorer_server <- function(input, output, session) {
+  server_saved_model_choices <- reactiveVal(saved_model_file_choices())
   app_settings_initial <- load_app_settings_store()
   prediction_axes_initial <- normalize_prediction_axis_store(
     if (file.exists(prediction_axis_store_path())) {
@@ -6916,6 +6965,49 @@ explorer_server <- function(input, output, session) {
       repro_code()
     )
   })
+
+  observeEvent(input$refresh_saved_models, {
+    choices <- saved_model_file_choices()
+    server_saved_model_choices(choices)
+    selected <- input$project_saved_model %||% ""
+    if (!selected %in% unname(choices)) selected <- ""
+    updateSelectInput(
+      session,
+      "project_saved_model",
+      choices = c("Select a saved model" = "", choices),
+      selected = selected
+    )
+    showNotification(
+      sprintf("Found %d loadable saved model%s.", length(choices), if (length(choices) == 1L) "" else "s"),
+      type = "message"
+    )
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$project_saved_model, {
+    path <- input$project_saved_model %||% ""
+    req(nzchar(path))
+    choices <- server_saved_model_choices()
+    if (!path %in% unname(choices) || !file.exists(path)) {
+      showNotification("The selected server model is no longer available. Refresh the saved-model list.", type = "error", duration = 10)
+      return(invisible(NULL))
+    }
+
+    state <- tryCatch(
+      readRDS(path),
+      error = function(e) {
+        showNotification(paste("Could not read saved model:", e$message), type = "error", duration = 10)
+        NULL
+      }
+    )
+    if (is.null(state)) return(invisible(NULL))
+
+    tryCatch(
+      restore_saved_fit(state, source_label = basename(path)),
+      error = function(e) {
+        showNotification(paste("Could not load saved model:", e$message), type = "error", duration = 10)
+      }
+    )
+  }, ignoreInit = TRUE)
 
   observeEvent(input$load_model, {
     req(input$load_model$datapath)
