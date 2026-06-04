@@ -4514,7 +4514,15 @@ multinom_catcov_choices <- c(
   "free (slowest)" = "free"
 )
 
-ui <- fluidPage(
+combined_visualisations_app <- new.env(parent = globalenv())
+sys.source(
+  file.path("combined_visualisations", "app.R"),
+  envir = combined_visualisations_app
+)
+combined_visualisations_ui <- combined_visualisations_app$ui
+combined_visualisations_server <- combined_visualisations_app$server
+
+explorer_ui <- fluidPage(
   tags$head(
     tags$script(HTML(
       "Shiny.addCustomMessageHandler('copyReproCode', function(_) {
@@ -4711,7 +4719,7 @@ ui <- fluidPage(
   )
 )
 
-server <- function(input, output, session) {
+explorer_server <- function(input, output, session) {
   app_settings_initial <- load_app_settings_store()
   prediction_axes_initial <- normalize_prediction_axis_store(
     if (file.exists(prediction_axis_store_path())) {
@@ -7078,6 +7086,20 @@ server <- function(input, output, session) {
     validate(need(!is.null(pred), "No prediction table available for selected variables."))
     datatable(pred, options = list(pageLength = 12, scrollX = TRUE))
   })
+}
+
+ui <- fluidPage(
+  tabsetPanel(
+    id = "application_tab",
+    selected = "Model Explorer",
+    tabPanel("Model Explorer", explorer_ui),
+    tabPanel("Combined Visualisations", combined_visualisations_ui)
+  )
+)
+
+server <- function(input, output, session) {
+  explorer_server(input, output, session)
+  combined_visualisations_server(input, output, session)
 }
 
 shinyApp(ui, server)
