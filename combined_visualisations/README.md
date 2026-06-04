@@ -21,6 +21,10 @@ observed in a minimum number of selected periods. When a lemma is absent from an
 intermediate period, its last observed position remains visible until its next
 observation.
 
+The Clustered Heatmap tab displays one narrow heatmap per selected period. Lemma
+labels omit the period name, semantic groups are boxed as separate panels, and
+the color scale is shared across the displayed periods.
+
 Run the app from the repository root:
 
 ```r

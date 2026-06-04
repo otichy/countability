@@ -188,8 +188,11 @@ ui <- fluidPage(
         ),
         tabPanel(
           "Clustered Heatmap",
-          tags$p("Rows are clustered from standardized smoothed logits. The highest-coverage rows are retained when the row limit is exceeded."),
-          plotOutput("heatmap_plot", height = 900)
+          tags$p(
+            "Each selected period is shown as a separate heatmap. Rows are clustered within semantic groups, ",
+            "and colors are standardized across all displayed periods for comparison."
+          ),
+          uiOutput("heatmap_plots_ui")
         ),
         tabPanel(
           "Semantics Tree",
@@ -676,44 +679,144 @@ server <- function(input, output, session) {
       config(displaylogo = FALSE)
   })
 
-  output$heatmap_plot <- renderPlot({
+  heatmap_period_data <- reactive({
     df <- model_data()
     cols <- feature_columns(transformed = TRUE)
     validate(need(nrow(df) >= 2L, "At least two complete cells are required for clustering."))
 
-    if (nrow(df) > input$heatmap_max) {
-      df <- df[order(df$min_primary_total, decreasing = TRUE), , drop = FALSE]
-      df <- df[seq_len(input$heatmap_max), , drop = FALSE]
-    }
-
     matrix_values <- scale(as.matrix(df[cols]))
-    rownames(matrix_values) <- paste(df$lemma, as.character(df$analysis_period), sep = " | ")
-    distance <- stats::dist(matrix_values)
-    ordering <- stats::hclust(distance, method = "ward.D2")$order
-    row_order <- rownames(matrix_values)[ordering]
+    fill_limit <- max(abs(matrix_values), na.rm = TRUE)
+    df$.heatmap_row_id <- seq_len(nrow(df))
+    df$.heatmap_q_many <- matrix_values[, 1L]
+    df$.heatmap_number_plural <- matrix_values[, 2L]
+    df$.heatmap_det_a <- matrix_values[, 3L]
 
-    heat <- data.frame(
-      row = rep(rownames(matrix_values), times = ncol(matrix_values)),
-      feature = rep(unname(primary_labels), each = nrow(matrix_values)),
-      value = as.vector(matrix_values),
-      stringsAsFactors = FALSE
-    )
-    heat$row <- factor(heat$row, levels = rev(row_order))
-    heat$feature <- factor(heat$feature, levels = unname(primary_labels))
-    semantics_map <- setNames(as.character(df$semantics), rownames(matrix_values))
-    heat$semantics <- semantics_map[as.character(heat$row)]
+    periods <- levels(droplevels(df$analysis_period))
+    out <- lapply(periods, function(period) {
+      period_df <- df[as.character(df$analysis_period) == period, , drop = FALSE]
+      if (nrow(period_df) > input$heatmap_max) {
+        period_df <- period_df[order(period_df$min_primary_total, decreasing = TRUE), , drop = FALSE]
+        period_df <- period_df[seq_len(input$heatmap_max), , drop = FALSE]
+      }
 
-    ggplot(heat, aes(x = feature, y = row, fill = value)) +
-      geom_tile(color = "white", linewidth = 0.15) +
-      scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0) +
-      labs(x = NULL, y = NULL, fill = "Standardized\nsmoothed logit") +
+      semantic_levels <- levels(droplevels(period_df$semantics))
+      row_order <- unlist(lapply(semantic_levels, function(semantic) {
+        group_df <- period_df[as.character(period_df$semantics) == semantic, , drop = FALSE]
+        if (nrow(group_df) <= 1L) return(group_df$lemma)
+        group_matrix <- as.matrix(group_df[c(
+          ".heatmap_q_many",
+          ".heatmap_number_plural",
+          ".heatmap_det_a"
+        )])
+        group_df$lemma[stats::hclust(stats::dist(group_matrix), method = "ward.D2")$order]
+      }), use.names = FALSE)
+
+      heat <- do.call(rbind, lapply(seq_along(primary_prefixes), function(i) {
+        data.frame(
+          lemma = period_df$lemma,
+          semantics = period_df$semantics,
+          feature = factor(
+            c("many", "plural", "a")[[i]],
+            levels = c("many", "plural", "a")
+          ),
+          value = period_df[[c(
+            ".heatmap_q_many",
+            ".heatmap_number_plural",
+            ".heatmap_det_a"
+          )[[i]]]],
+          stringsAsFactors = FALSE
+        )
+      }))
+      heat$lemma <- factor(heat$lemma, levels = rev(row_order))
+      heat$semantics <- factor(
+        as.character(heat$semantics),
+        levels = semantic_levels
+      )
+      list(period = period, data = heat, rows = nrow(period_df), fill_limit = fill_limit)
+    })
+    names(out) <- periods
+    out
+  })
+
+  build_period_heatmap <- function(period_result, show_legend = FALSE) {
+    heat <- period_result$data
+    ggplot(heat, aes(x = feature, y = lemma, fill = value)) +
+      geom_tile(color = "white", linewidth = 0.2) +
+      scale_fill_gradient2(
+        low = "#2166AC",
+        mid = "white",
+        high = "#B2182B",
+        midpoint = 0,
+        limits = c(-period_result$fill_limit, period_result$fill_limit)
+      ) +
+      labs(
+        title = period_result$period,
+        subtitle = sprintf("%d lemmas", period_result$rows),
+        x = NULL,
+        y = NULL,
+        fill = "Standardized\nsmoothed logit"
+      ) +
       facet_grid(semantics ~ ., scales = "free_y", space = "free_y") +
       plot_theme() +
       theme(
-        axis.text.x = element_text(angle = 25, hjust = 1),
-        axis.text.y = element_text(size = 7),
-        strip.text.y = element_text(angle = 0)
+        legend.position = if (isTRUE(show_legend)) "bottom" else "none",
+        panel.border = element_rect(color = "grey20", fill = NA, linewidth = 0.8),
+        strip.background = element_rect(color = "grey20", fill = "grey92", linewidth = 0.8),
+        strip.text.y = element_text(angle = 0, face = "bold", size = 9),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(face = "bold", size = 11),
+        plot.subtitle = element_text(size = 8),
+        panel.spacing.y = grid::unit(0.15, "lines"),
+        plot.margin = margin(5.5, 5.5, 5.5, 5.5)
       )
+  }
+
+  output$heatmap_plots_ui <- renderUI({
+    period_results <- heatmap_period_data()
+    validate(need(length(period_results) > 0L, "No periods are available for the heatmap."))
+    plot_ids <- paste0("heatmap_period_", seq_along(period_results))
+    panel_width <- max(260L, min(420L, 220L + 4L * max(vapply(
+      period_results,
+      function(x) max(nchar(as.character(x$data$lemma)), na.rm = TRUE),
+      numeric(1)
+    ))))
+    panel_height <- max(360L, min(1000L, 220L + 22L * max(vapply(
+      period_results,
+      function(x) x$rows,
+      numeric(1)
+    ))))
+
+    tagList(
+      tags$div(
+        style = "overflow-x: auto; width: 100%;",
+        tags$div(
+          style = "display: flex; align-items: flex-start; gap: 12px; width: max-content;",
+          lapply(seq_along(plot_ids), function(i) {
+            tags$div(
+              style = sprintf("width: %dpx; flex: 0 0 %dpx;", panel_width, panel_width),
+              plotOutput(plot_ids[[i]], height = panel_height)
+            )
+          })
+        )
+      )
+    )
+  })
+
+  observe({
+    period_results <- heatmap_period_data()
+    if (length(period_results) == 0L) return(invisible(NULL))
+    for (i in seq_along(period_results)) {
+      local({
+        idx <- i
+        plot_id <- paste0("heatmap_period_", idx)
+        output[[plot_id]] <- renderPlot({
+          results <- heatmap_period_data()
+          validate(need(length(results) >= idx, "Heatmap period is no longer available."))
+          build_period_heatmap(results[[idx]], show_legend = idx == length(results))
+        })
+      })
+    }
   })
 
   tree_result <- reactive({
